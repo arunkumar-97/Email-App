@@ -1,0 +1,493 @@
+package com.jesperapps.email.api.controller;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.Properties;
+
+import javax.crypto.Cipher;
+import javax.crypto.spec.SecretKeySpec;
+import javax.mail.Authenticator;
+import javax.mail.Folder;
+import javax.mail.MessagingException;
+import javax.mail.PasswordAuthentication;
+import javax.mail.Session;
+import javax.mail.Store;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RestController;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.jesperapps.email.api.extra.GeneratePlainPassword;
+import com.jesperapps.email.api.extra.HexStringToByteArray;
+import com.jesperapps.email.api.message.EmailResponseEntity;
+import com.jesperapps.email.api.model.EmailFolder;
+import com.jesperapps.email.api.model.SubFolder;
+import com.jesperapps.email.api.model.User;
+import com.jesperapps.email.api.service.UserService;
+
+@CrossOrigin(origins = "*", allowedHeaders = "*")
+@RestController
+public class SubFolderController {
+	@Autowired
+	private UserService userService;
+	@Autowired
+	private ObjectMapper objectMapper;
+	EmailResponseEntity res = new EmailResponseEntity();
+	String username;
+	String pwd;
+	String OriginalPassword;
+
+	@PostMapping("/subfolder")
+	public ResponseEntity createSubFolder(@RequestBody SubFolder subFolder) throws Exception {
+		Optional<User> user = userService.findById(subFolder.getUser().getId());
+		if (user.isPresent()) {
+			username = user.get().getUserName();
+			pwd = user.get().getPassword();
+			// RETRIVE ENCRYPTED PASSWORD
+			byte[] bytekey = HexStringToByteArray.hexStringToByteArray(user.get().getKeyValue());
+			SecretKeySpec sks = new SecretKeySpec(bytekey, GeneratePlainPassword.AES);
+			Cipher cipher = Cipher.getInstance(GeneratePlainPassword.AES);
+			cipher.init(Cipher.DECRYPT_MODE, sks);
+			byte[] decrypted = cipher.doFinal(HexStringToByteArray.hexStringToByteArray(pwd));
+			OriginalPassword = new String(decrypted);
+			// RETRIVE ENCRYPTED PASSWORD
+			return postSubFolder(user.get().getEmailConfiguration().getIncomingHost(),
+					user.get().getEmailConfiguration().getIncomingProtocol(), username, OriginalPassword,
+					user.get().getEmailConfiguration().getIncomingPort(),
+					user.get().getEmailConfiguration().isAuthentication(),
+					user.get().getEmailConfiguration().isSecurity(), subFolder);
+		} else {
+			ObjectNode jsonObject = objectMapper.createObjectNode();
+			jsonObject.put("errorCode", res.setErrorCode(404));
+			jsonObject.put("message", res.setMessage("User id not found"));
+			return new ResponseEntity(jsonObject, HttpStatus.CONFLICT);
+		}
+
+	}
+
+	private ResponseEntity postSubFolder(String incomingHost, String incomingProtocol, String username2,
+			String originalPassword2, Integer incomingPort, boolean authentication, boolean security,
+			SubFolder subFolder) {
+		try {
+			Properties props = new Properties();
+			props.put("mail.smtp.auth", authentication);
+			props.put("mail.smtp.starttls.enable", security);
+			props.put("mail.smtp.host", incomingHost);
+			props.put("mail.smtp.port", incomingPort);
+			Authenticator auth = new Authenticator() {
+				protected PasswordAuthentication getPasswordAuthentication() {
+					return new PasswordAuthentication(username, OriginalPassword);
+				}
+			};
+			Session session = Session.getInstance(props, auth);
+			Store store = session.getStore(incomingProtocol);
+			store.connect(incomingHost, incomingPort, username2, originalPassword2);
+
+			String[] folderparts = subFolder.getFolder().getFolderName().split("/");
+			String subfolderparts = subFolder.getSubFolderName();
+			Folder f = store.getDefaultFolder();
+			Folder cf = store.getDefaultFolder();
+			Folder sf = store.getDefaultFolder();
+			// Open destination folder
+			for (int i = 0; i < folderparts.length; i++) {
+				f = f.getFolder(folderparts[i]);
+				if (f.exists() == true ) {
+					sf = sf.getFolder(folderparts[i] + "." +subfolderparts);
+					if (!sf.exists()) {
+						cf = cf.getFolder(folderparts[i] + "." + subFolder.getSubFolderName());
+						// Create folder
+						boolean isCreated = cf.create(Folder.HOLDS_MESSAGES);
+						if (true) {
+							cf.setSubscribed(subFolder.getStatus());
+							ObjectNode jsonObject = objectMapper.createObjectNode();
+							jsonObject.put("statusCode", res.SUCCESS);
+							jsonObject.put("description", res.setDescription("Folder Created Successfully"));
+							return new ResponseEntity(jsonObject, HttpStatus.OK);
+						} else {
+							ObjectNode jsonObject = objectMapper.createObjectNode();
+							jsonObject.put("errorCode", res.FAILURE);
+							jsonObject.put("message", res.setMessage("Unable to Create Folder"));
+							return new ResponseEntity(jsonObject, HttpStatus.CONFLICT);
+						}
+					} else {
+						ObjectNode jsonObject = objectMapper.createObjectNode();
+						jsonObject.put("errorCode", res.setErrorCode(409));
+						jsonObject.put("message", res.setMessage("SubFolder Already Exists"));
+						return new ResponseEntity(jsonObject, HttpStatus.CONFLICT);
+					}
+
+				} else {
+					ObjectNode jsonObject = objectMapper.createObjectNode();
+					jsonObject.put("errorCode", res.setErrorCode(409));
+					jsonObject.put("message", res.setMessage("Folder doesnot Exist"));
+					return new ResponseEntity(jsonObject, HttpStatus.CONFLICT);
+				}
+			}
+		} catch (Exception e) {
+
+		}
+
+		return null;
+	}
+
+	@PutMapping("/subfolder/{renameSubFolder}")
+	public ResponseEntity updateFolder(@RequestBody SubFolder subFolder,
+			@PathVariable("renameSubFolder") String renameSubFolder) throws Exception {
+		Optional<User> user = userService.findById(subFolder.getUser().getId());
+		if (user.isPresent()) {
+			username = user.get().getUserName();
+			pwd = user.get().getPassword();
+			// RETRIVE ENCRYPTED PASSWORD
+			byte[] bytekey = HexStringToByteArray.hexStringToByteArray(user.get().getKeyValue());
+			SecretKeySpec sks = new SecretKeySpec(bytekey, GeneratePlainPassword.AES);
+			Cipher cipher = Cipher.getInstance(GeneratePlainPassword.AES);
+			cipher.init(Cipher.DECRYPT_MODE, sks);
+			byte[] decrypted = cipher.doFinal(HexStringToByteArray.hexStringToByteArray(pwd));
+			OriginalPassword = new String(decrypted);
+			// RETRIVE ENCRYPTED PASSWORD
+			return putFolder(user.get().getEmailConfiguration().getIncomingHost(),
+					user.get().getEmailConfiguration().getIncomingProtocol(), username, OriginalPassword,
+					user.get().getEmailConfiguration().getIncomingPort(),
+					user.get().getEmailConfiguration().isAuthentication(),
+					user.get().getEmailConfiguration().isSecurity(), subFolder, renameSubFolder);
+		} else {
+			ObjectNode jsonObject = objectMapper.createObjectNode();
+			jsonObject.put("errorCode", res.setErrorCode(404));
+			jsonObject.put("message", res.setMessage("User id not found"));
+			return new ResponseEntity(jsonObject, HttpStatus.CONFLICT);
+		}
+
+	}
+
+	private ResponseEntity putFolder(String incomingHost, String incomingProtocol, String username2,
+			String originalPassword2, Integer incomingPort, boolean authentication, boolean security,
+			SubFolder subFolder, String renameSubFolder) {
+		try {
+			Properties props = new Properties();
+			props.put("mail.smtp.auth", authentication);
+			props.put("mail.smtp.starttls.enable", security);
+			props.put("mail.smtp.host", incomingHost);
+			props.put("mail.smtp.port", incomingPort);
+			Authenticator auth = new Authenticator() {
+				protected PasswordAuthentication getPasswordAuthentication() {
+					return new PasswordAuthentication(username, OriginalPassword);
+				}
+			};
+			Session session = Session.getInstance(props, auth);
+			Store store = session.getStore(incomingProtocol);
+			store.connect(incomingHost, incomingPort, username2, originalPassword2);
+
+			String[] folderparts = subFolder.getFolder().getFolderName().split("/");
+			String subfolderparts = subFolder.getSubFolderName();
+			Folder f = store.getDefaultFolder();
+			Folder sf = store.getDefaultFolder();
+			// Open destination folder
+			for (int i = 0; i < folderparts.length; i++) {
+				f = f.getFolder(folderparts[i]);
+//				f.setSubscribed(subFolder.getFolder().getStatus());
+				if (f.exists()& f.isSubscribed()) {
+					sf = sf.getFolder(folderparts[i] + "." + subfolderparts);
+//					sf.setSubscribed(subFolder.getStatus());
+					System.out.println(subFolder.getStatus()+"subFolder.getStatus()");
+				
+					if (sf.exists()& sf.isSubscribed()) {
+						Folder rf = store.getFolder(folderparts[i] + "." +renameSubFolder);
+						if(rf.exists()) {
+							ObjectNode jsonObject = objectMapper.createObjectNode();
+							jsonObject.put("errorCode", res.setErrorCode(409));
+							jsonObject.put("message",
+									res.setMessage("SubFolder already exist"));
+							return new ResponseEntity(jsonObject, HttpStatus.CONFLICT);
+						}else {
+							// Create folder						
+							boolean isRenamed = sf.renameTo(rf);
+							if (true) {
+								rf.setSubscribed(subFolder.getStatus());
+								try {
+									if ((rf.getType() & Folder.HOLDS_FOLDERS) != 0) {
+										Folder[] f1 = rf.list();
+										for (int i1 = 0; i1 < f1.length; i1++) {
+											// Search for sub folders
+											if ((f1[i1].getType() & Folder.HOLDS_FOLDERS) != 0) {
+												f1[i1].setSubscribed(true);
+											}
+										}
+									}
+								} catch (MessagingException m) {
+//								      throw new KettleException( m );
+								}
+								ObjectNode jsonObject = objectMapper.createObjectNode();
+								jsonObject.put("statusCode", res.SUCCESS);
+								jsonObject.put("description", res.setDescription("Folder Updated Successfully"));
+								return new ResponseEntity(jsonObject, HttpStatus.OK);
+							} else {
+								ObjectNode jsonObject = objectMapper.createObjectNode();
+								jsonObject.put("errorCode", res.FAILURE);
+								jsonObject.put("message", res.setMessage("Unable to Update Folder"));
+								return new ResponseEntity(jsonObject, HttpStatus.CONFLICT);
+							}
+						}
+						
+					} else {
+						ObjectNode jsonObject = objectMapper.createObjectNode();
+						jsonObject.put("errorCode", res.setErrorCode(404));
+						jsonObject.put("message", res.setMessage("SubFolder Not Found"));
+						return new ResponseEntity(jsonObject, HttpStatus.NOT_FOUND);
+					}
+				} else {
+					ObjectNode jsonObject = objectMapper.createObjectNode();
+					jsonObject.put("errorCode", res.setErrorCode(404));
+					jsonObject.put("message", res.setMessage("Folder Not Found"));
+					return new ResponseEntity(jsonObject, HttpStatus.NOT_FOUND);
+				}
+			}
+		} catch (Exception e) {
+
+		}
+
+		return null;
+	}
+
+	@DeleteMapping("/subfolder")
+	public ResponseEntity delFolder(@RequestBody SubFolder subFolder) throws Exception {
+		Optional<User> user = userService.findById(subFolder.getUser().getId());
+		if (user.isPresent()) {
+			username = user.get().getUserName();
+			pwd = user.get().getPassword();
+			// RETRIVE ENCRYPTED PASSWORD
+			byte[] bytekey = HexStringToByteArray.hexStringToByteArray(user.get().getKeyValue());
+			SecretKeySpec sks = new SecretKeySpec(bytekey, GeneratePlainPassword.AES);
+			Cipher cipher = Cipher.getInstance(GeneratePlainPassword.AES);
+			cipher.init(Cipher.DECRYPT_MODE, sks);
+			byte[] decrypted = cipher.doFinal(HexStringToByteArray.hexStringToByteArray(pwd));
+			OriginalPassword = new String(decrypted);
+			// RETRIVE ENCRYPTED PASSWORD
+			return deleteFolder(user.get().getEmailConfiguration().getIncomingHost(),
+					user.get().getEmailConfiguration().getIncomingProtocol(), username, OriginalPassword,
+					user.get().getEmailConfiguration().getIncomingPort(),
+					user.get().getEmailConfiguration().isAuthentication(),
+					user.get().getEmailConfiguration().isSecurity(), subFolder);
+		} else {
+			ObjectNode jsonObject = objectMapper.createObjectNode();
+			jsonObject.put("errorCode", res.setErrorCode(404));
+			jsonObject.put("message", res.setMessage("User id not found"));
+			return new ResponseEntity(jsonObject, HttpStatus.CONFLICT);
+		}
+
+	}
+
+	private ResponseEntity deleteFolder(String incomingHost, String incomingProtocol, String username2,
+			String originalPassword2, Integer incomingPort, boolean authentication, boolean security,
+			SubFolder subFolder) {
+		try {
+			Properties props = new Properties();
+			props.put("mail.smtp.auth", authentication);
+			props.put("mail.smtp.starttls.enable", security);
+			props.put("mail.smtp.host", incomingHost);
+			props.put("mail.smtp.port", incomingPort);
+			Authenticator auth = new Authenticator() {
+				protected PasswordAuthentication getPasswordAuthentication() {
+					return new PasswordAuthentication(username, OriginalPassword);
+				}
+			};
+			Session session = Session.getInstance(props, auth);
+			Store store = session.getStore(incomingProtocol);
+			store.connect(incomingHost, incomingPort, username2, originalPassword2);
+
+			String[] folderparts = subFolder.getFolder().getFolderName().split("/");
+			String subfolderparts = subFolder.getSubFolderName();
+			Folder f = store.getDefaultFolder();
+			Folder sf = store.getDefaultFolder();
+			// Open destination folder
+			for (int i = 0; i < folderparts.length; i++) {
+				f = f.getFolder(folderparts[i]);
+//				f.setSubscribed(subFolder.getFolder().getStatus());
+				if (f.exists() == true & f.isSubscribed()) {
+					sf = sf.getFolder(folderparts[i] + "." + subfolderparts);
+//					sf.setSubscribed(subFolder.getStatus());
+					if (sf.exists() & sf.isSubscribed()) {
+						if (sf.getMessageCount() == 0) {
+							// Create folder
+							boolean isDeleted = sf.delete(true);
+							if (true) {
+								ObjectNode jsonObject = objectMapper.createObjectNode();
+								jsonObject.put("statusCode", res.SUCCESS);
+								jsonObject.put("description", res.setDescription("SubFolder Deleted Successfully"));
+								return new ResponseEntity(jsonObject, HttpStatus.OK);
+							} else {
+								ObjectNode jsonObject = objectMapper.createObjectNode();
+								jsonObject.put("errorCode", res.FAILURE);
+								jsonObject.put("message", res.setMessage("Unable to Delete SubFolder"));
+								return new ResponseEntity(jsonObject, HttpStatus.CONFLICT);
+							}
+						} else {
+							ObjectNode jsonObject = objectMapper.createObjectNode();
+							jsonObject.put("errorCode", res.FAILURE);
+							jsonObject.put("message", res.setMessage("This SubFolder Has Emails"));
+							return new ResponseEntity(jsonObject, HttpStatus.CONFLICT);
+						}
+					} else {
+						ObjectNode jsonObject = objectMapper.createObjectNode();
+						jsonObject.put("errorCode", res.setErrorCode(404));
+						jsonObject.put("message", res.setMessage("SubFolder not found"));
+						return new ResponseEntity(jsonObject, HttpStatus.NOT_FOUND);
+					}
+				} else {
+					ObjectNode jsonObject = objectMapper.createObjectNode();
+					jsonObject.put("errorCode", res.setErrorCode(404));
+					jsonObject.put("message", res.setMessage("Folder not found"));
+					return new ResponseEntity(jsonObject, HttpStatus.NOT_FOUND);
+				}
+			}
+		} catch (Exception e) {
+
+		}
+
+		return null;
+	}
+
+	@GetMapping("/subfolder/{subFolderName}/{userId}")
+	public ResponseEntity folderByFolderName(@PathVariable("subFolderName") String subFolderName,
+			@PathVariable("userId") Integer id) throws Exception {
+		Optional<User> user = userService.findById(id);
+
+		if (user.isPresent()) {
+			String username = user.get().getUserName();
+			String pwd = user.get().getPassword();
+
+			// RETRIVE ENCRYPTED PASSWORD
+			byte[] bytekey = HexStringToByteArray.hexStringToByteArray(user.get().getKeyValue());
+			SecretKeySpec sks = new SecretKeySpec(bytekey, GeneratePlainPassword.AES);
+			Cipher cipher = Cipher.getInstance(GeneratePlainPassword.AES);
+			cipher.init(Cipher.DECRYPT_MODE, sks);
+			byte[] decrypted = cipher.doFinal(HexStringToByteArray.hexStringToByteArray(pwd));
+			String OriginalPassword = new String(decrypted);
+			System.out.println(OriginalPassword);
+			// RETRIVE ENCRYPTED PASSWORD
+
+			String host = user.get().getEmailConfiguration().getIncomingHost();
+			String mailstoreType = user.get().getEmailConfiguration().getIncomingProtocol();
+			int port = user.get().getEmailConfiguration().getIncomingPort();
+			boolean auth = user.get().getEmailConfiguration().isAuthentication();
+			boolean security = user.get().getEmailConfiguration().isSecurity();
+			return fetchFolderByFolderName(host, mailstoreType, username, OriginalPassword, port, auth, security,
+					subFolderName);
+		} else {
+			ObjectNode jsonObject = objectMapper.createObjectNode();
+			jsonObject.put("errorCode", res.setErrorCode(404));
+			jsonObject.put("message", res.setMessage("User id not found"));
+			return new ResponseEntity(jsonObject, HttpStatus.CONFLICT);
+		}
+	}
+
+	public ResponseEntity fetchFolderByFolderName(String hostval, String mailStrProt, String uname, String password,
+			int port, boolean auth, boolean security, String subFolderName) throws Exception {
+		Properties properties = new Properties();
+		properties.put("mail.store.protocol", mailStrProt);
+		properties.put("mail.host", hostval);
+		properties.put("mail.port", port);
+		properties.put("mail.smtp.ssl.enable", security);
+		Session emailSession = Session.getDefaultInstance(properties);
+		Store store = emailSession.getStore(mailStrProt);
+		store.connect(hostval, port, uname, password);
+
+		Folder f = store.getDefaultFolder().getFolder(subFolderName);
+		System.out.println(">> " + f.getName());
+		EmailFolder emailFolder = new EmailFolder(f);
+
+		if (emailFolder == null) {
+			ObjectNode jsonObject = objectMapper.createObjectNode();
+			jsonObject.put("errorCode", res.setStatusCode(204));
+			jsonObject.put("message", res.setMessage("No Data"));
+			return new ResponseEntity(jsonObject, HttpStatus.NOT_FOUND);
+		} else {
+			return new ResponseEntity(emailFolder, HttpStatus.OK);
+		}
+
+	}
+
+	@GetMapping("/subfolder/folder/{folderName}/{userId}")
+	public ResponseEntity folderList(@PathVariable("folderName") String folderName, @PathVariable("userId") Integer id)
+			throws Exception {
+		Optional<User> user = userService.findById(id);
+
+		if (user.isPresent()) {
+			String username = user.get().getUserName();
+			String pwd = user.get().getPassword();
+
+			// RETRIVE ENCRYPTED PASSWORD
+			byte[] bytekey = HexStringToByteArray.hexStringToByteArray(user.get().getKeyValue());
+			SecretKeySpec sks = new SecretKeySpec(bytekey, GeneratePlainPassword.AES);
+			Cipher cipher = Cipher.getInstance(GeneratePlainPassword.AES);
+			cipher.init(Cipher.DECRYPT_MODE, sks);
+			byte[] decrypted = cipher.doFinal(HexStringToByteArray.hexStringToByteArray(pwd));
+			String OriginalPassword = new String(decrypted);
+			System.out.println(OriginalPassword);
+			// RETRIVE ENCRYPTED PASSWORD
+
+			String host = user.get().getEmailConfiguration().getIncomingHost();
+			String mailstoreType = user.get().getEmailConfiguration().getIncomingProtocol();
+			int port = user.get().getEmailConfiguration().getIncomingPort();
+			boolean auth = user.get().getEmailConfiguration().isAuthentication();
+			boolean security = user.get().getEmailConfiguration().isSecurity();
+			return fetchFolderList(host, mailstoreType, username, OriginalPassword, port, auth, security, folderName);
+		} else {
+			ObjectNode jsonObject = objectMapper.createObjectNode();
+			jsonObject.put("errorCode", res.setErrorCode(404));
+			jsonObject.put("message", res.setMessage("User id not found"));
+			return new ResponseEntity(jsonObject, HttpStatus.CONFLICT);
+		}
+	}
+
+	public ResponseEntity fetchFolderList(String hostval, String mailStrProt, String uname, String password, int port,
+			boolean auth, boolean security, String folderName) throws Exception {
+		Properties properties = new Properties();
+		properties.put("mail.store.protocol", mailStrProt);
+		properties.put("mail.host", hostval);
+		properties.put("mail.port", port);
+		properties.put("mail.smtp.ssl.enable", security);
+		Session emailSession = Session.getDefaultInstance(properties);
+		Store store = emailSession.getStore(mailStrProt);
+		store.connect(hostval, port, uname, password);
+
+		List<SubFolder> subFolderList = new ArrayList<SubFolder>();
+
+		Folder folder = store.getFolder(folderName);
+		try {
+			if ((folder.getType() & Folder.HOLDS_FOLDERS) != 0) {
+				Folder[] f = folder.list();
+				for (int i = 0; i < f.length; i++) {
+					// Search for sub folders
+					if ((f[i].getType() & Folder.HOLDS_FOLDERS) != 0) {
+						SubFolder subFolder = new SubFolder(f[i]);
+						subFolderList.add(subFolder);
+					}
+				}
+			}
+		} catch (MessagingException m) {
+//		      throw new KettleException( m );
+		}
+		if (subFolderList.isEmpty()) {
+			ObjectNode jsonObject = objectMapper.createObjectNode();
+			jsonObject.put("errorCode", res.setStatusCode(204));
+			jsonObject.put("message", res.setMessage("No Data"));
+			return new ResponseEntity(jsonObject, HttpStatus.NOT_FOUND);
+		} else {
+			return new ResponseEntity(subFolderList, HttpStatus.OK);
+		}
+
+	}
+
+}
